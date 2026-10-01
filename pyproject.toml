@@ -1,0 +1,12 @@
+[project]
+name = "applied-linear-algebra"
+version = "0.1.0"
+description = "Applied linear algebra, as marimo notebooks"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "marimo>=0.9",
+    "numpy",
+    "scipy",
+    "matplotlib",
+]
