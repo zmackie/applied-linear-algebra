@@ -24,7 +24,7 @@ from pathlib import Path
 
 REQUIRED_SECRETS = ("armlab-llm", "huggingface")
 REQUIRED_VOLUMES = ("armlab-runs",)
-EXPECTED_APPS = ("armlab-results", "armlab-safety-cron")
+EXPECTED_APPS = ("armlab-results", "armlab-safety-cron", "cosmos-reason")
 HOSTS = {"api.modal.com": "https://api.modal.com", "github.com": "https://github.com"}
 MODEL_KEYS = ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "HF_TOKEN")
 

@@ -23,6 +23,7 @@ import modal
 
 # BASE_NOTE: workspaces created before 2025 build `debian_slim` on Debian bullseye, whose apt mirrors went
 # away when bullseye LTS ended (Aug 2026), so apt_install 404s. Pin a bookworm base explicitly.
+# Python 3.11 because the old builder's pinned Modal client deps (aiohttp) do not build on 3.12.
 
 MODEL = os.environ.get("ARMLAB_COSMOS_MODEL") or os.environ.get("COSMOS_REASON_MODEL") or "nvidia/Cosmos3-Nano"
 GPU = os.environ.get("ARMLAB_COSMOS_GPU", "L40S")  # 48 GB: Cosmos3-Nano's reasoner weights fit in bf16; H100 for more headroom
@@ -32,8 +33,8 @@ COSMOS_FRAMEWORK_COMMIT = "cf5d68c00d97ccd2480a2320ed652b92dec63102"  # NVIDIA/c
 
 if IS_COSMOS3:
     image = (
-        modal.Image.from_registry("python:3.12-slim-bookworm")  # see BASE_NOTE
-        .apt_install("git", "ffmpeg")
+        modal.Image.from_registry("python:3.11-slim-bookworm")  # see BASE_NOTE
+        .apt_install("git", "ffmpeg", "build-essential")  # Triton JIT-compiles a CUDA helper with gcc at startup
         .run_commands(
             "git init -q /opt/cosmos-framework && cd /opt/cosmos-framework"
             " && git remote add origin https://github.com/NVIDIA/cosmos-framework"
@@ -46,7 +47,7 @@ if IS_COSMOS3:
     )
 else:  # Cosmos-Reason2 (Qwen3-VL based) runs on stock vLLM
     image = (
-        modal.Image.from_registry("python:3.12-slim-bookworm")  # see BASE_NOTE
+        modal.Image.from_registry("python:3.11-slim-bookworm")  # see BASE_NOTE
         .apt_install("ffmpeg")
         .uv_pip_install("vllm>=0.11.0", "huggingface_hub[hf_transfer]")
     )
