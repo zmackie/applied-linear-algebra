@@ -184,6 +184,8 @@ class VLMPolicyBase(Policy):
             lines.append("OBJECT STATE (from perception): " + json.dumps(obs.objects))
         if obs.feedback:
             lines.append(f"LAST SEGMENT: {obs.feedback}")
+        if obs.pixel_to_xyz is None:
+            lines.append("NOTE: pixel targets and locate queries are not available in this environment; use xyz targets.")
         if self.notes:
             lines.append(f"YOUR NOTES: {self.notes}")
         if self.history:

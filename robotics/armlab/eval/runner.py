@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import math
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -90,16 +89,18 @@ def _feedback(env: ArmEnv, info: dict, decision: Decision) -> str:
 def run_episode(task: str, seed: int, policy_kind: str = "oracle", vlm_spec: str | None = None,
                 clock: str = "paused", obs_mode: str = "vision", video: bool = False, run_name: str = "adhoc",
                 max_decisions: int = 60, overlay: bool = True, policy: Policy | None = None,
-                out_dir: Path | None = None, verbose: bool = True) -> EpisodeResult:
+                out_dir: Path | None = None, verbose: bool = True, extra_latency_s: float = 0.0) -> EpisodeResult:
     """Run one episode. clock='paused' freezes the world while the model thinks (as in the report);
-    clock='realtime' keeps the world moving for the model's measured latency."""
+    clock='realtime' keeps the world moving for the model's measured latency.
+    extra_latency_s adds a fixed per-decision delay (in sim time only) to emulate a slower model."""
     env = ArmEnv(task, seed=seed, obs_mode=obs_mode)
     pol = policy or make_policy(policy_kind, env, vlm_spec, seed, overlay=overlay)
     out = (out_dir or RUNS_DIR / run_name) / task / f"seed{seed}"
     out.mkdir(parents=True, exist_ok=True)
     vlm_name = getattr(getattr(pol, "vlm", None), "name", "")
     res = EpisodeResult(run_name, task, seed, policy_kind, vlm_name, clock, obs_mode, False, 0.0, 0, 0.0, 0)
-    rec = Recorder(env, out / "video.mp4", f"{policy_kind} | {vlm_name or 'no model'} | {task}: {env.task.instruction}") if video else None
+    lat_note = f" | +{extra_latency_s:g}s/decision simulated latency" if extra_latency_s else ""
+    rec = Recorder(env, out / "video.mp4", f"{policy_kind} | {vlm_name or 'no model'} | {clock} clock{lat_note} | {task}: {env.task.instruction}") if video else None
     log = open(out / "decisions.jsonl", "w")
     usage = Usage()
     t_start = time.time()
@@ -113,9 +114,11 @@ def run_episode(task: str, seed: int, policy_kind: str = "oracle", vlm_spec: str
                 break
             t0 = time.time()
             decision = pol.act(obs)
-            think_s = decision.usage.latency_s or (time.time() - t0)
+            think_s = (decision.usage.latency_s or (time.time() - t0)) + extra_latency_s
             usage.add(decision.usage)
             if clock == "realtime" and think_s > 0:
+                if rec:
+                    rec.set_decision(k, "think", f"Model deliberating for {think_s:.1f} s while the world keeps moving.", "")
                 env.idle(think_s, phase="think")
             elif rec and think_s > 0.5:
                 rec.pause_card(think_s)
@@ -206,6 +209,8 @@ def main(argv=None):
     ap.add_argument("--video", action="store_true")
     ap.add_argument("--run-name", default=None)
     ap.add_argument("--max-decisions", type=int, default=60)
+    ap.add_argument("--extra-latency", type=float, default=0.0,
+                    help="add this many seconds of (sim-time) thinking per decision, e.g. to show what latency does under --clock realtime")
     args = ap.parse_args(argv)
 
     tasks = list(TASKS) if args.tasks == "all" else args.tasks.split(",")
@@ -217,7 +222,8 @@ def main(argv=None):
     for t in tasks:
         for s in parse_seeds(args.seeds):
             r = run_episode(t, s, args.policy, args.vlm if args.policy in ("direct", "hybrid") else None, args.clock,
-                            args.obs_mode, args.video, run, args.max_decisions, overlay=not args.no_overlay)
+                            args.obs_mode, args.video, run, args.max_decisions, overlay=not args.no_overlay,
+                            extra_latency_s=args.extra_latency)
             results.append(r)
             print(f"{t} seed {s}: {'SUCCESS' if r.success else 'fail'} score {r.score:.0f} "
                   f"({r.decisions} decisions, {r.sim_time_s:.1f}s sim, {r.wall_time_s:.0f}s wall){' ' + r.error if r.error else ''}")
