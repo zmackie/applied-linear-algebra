@@ -2,7 +2,7 @@
 
 - AnthropicVLM: Claude via the official `anthropic` SDK (structured JSON output).
 - OpenAICompatVLM: any OpenAI-compatible chat endpoint (OpenAI models such as GPT-6 Astra,
-  NVIDIA NIM / build.nvidia.com hosted Cosmos Reason, vLLM servers on Modal, ...).
+  self-hosted Cosmos Reason on Modal via vLLM, other vLLM servers, ...).
 - ScriptedVLM: deterministic stand-in for tests and dry runs.
 """
 from __future__ import annotations
@@ -137,10 +137,7 @@ class OpenAICompatVLM(VLM):
 
     Examples:
       OpenAI:            OpenAICompatVLM(model="<gpt-6-astra model id>")             # OPENAI_API_KEY
-      NVIDIA hosted NIM: OpenAICompatVLM(model="nvidia/cosmos-reason2-8b",
-                                         base_url="https://integrate.api.nvidia.com/v1",
-                                         api_key_env="NVIDIA_API_KEY")
-      Self-hosted vLLM:  OpenAICompatVLM(model="nvidia/Cosmos-Reason2-8B", base_url="https://<modal-app>/v1",
+      Self-hosted vLLM:  OpenAICompatVLM(model="nvidia/Cosmos3-Nano", base_url="https://<modal-app>/v1",
                                          api_key_env="ARMLAB_VLLM_KEY")
     """
 
@@ -217,13 +214,45 @@ class ScriptedVLM(VLM):
         return text, Usage(input_tokens=1000, output_tokens=len(text) // 4, latency_s=self.latency_s, calls=1)
 
 
+# Cosmos Reason is self-hosted on Modal (modal_apps/cosmos_reason_vllm.py); the hosted build.nvidia.com API is gone.
+# The model is configurable so a successor (e.g. a Cosmos 3 reasoner) can be swapped in at deploy time.
+DEFAULT_COSMOS_MODEL = "nvidia/Cosmos3-Nano"  # Cosmos 3 Nano, served as the Reasoner; was nvidia/Cosmos-Reason2-8B
+COSMOS_APP = "cosmos-reason"
+
+
+def cosmos_model() -> str:
+    return os.environ.get("ARMLAB_COSMOS_MODEL") or os.environ.get("COSMOS_REASON_MODEL") or DEFAULT_COSMOS_MODEL
+
+
+def cosmos_base_url() -> str:
+    """OpenAI-compatible base URL of the self-hosted Cosmos endpoint: $ARMLAB_COSMOS_URL, or looked up from the
+    deployed `cosmos-reason` Modal app (needs a Modal token, or running inside Modal)."""
+    if os.environ.get("ARMLAB_COSMOS_URL"):
+        return os.environ["ARMLAB_COSMOS_URL"].rstrip("/")
+    app = os.environ.get("ARMLAB_COSMOS_APP", COSMOS_APP)
+    try:
+        import modal
+
+        url = modal.Function.from_name(app, "serve").get_web_url()
+    except Exception as e:
+        raise MissingCredentials(
+            f"Could not find the Cosmos endpoint: set ARMLAB_COSMOS_URL=https://.../v1, or deploy it with "
+            f"`modal deploy modal_apps/cosmos_reason_vllm.py` and make sure a Modal token is configured ({type(e).__name__})."
+        ) from e
+    if not url:
+        raise MissingCredentials(f"Modal app {app!r} has no web URL; is it deployed?")
+    return url.rstrip("/") + "/v1"
+
+
 def make_vlm(spec: str, **kw) -> VLM:
     """Build a client from a short spec string.
 
-    anthropic[:model[:effort]]       e.g. anthropic:claude-opus-5-5:medium
+    anthropic[:model[:effort]]       e.g. anthropic:claude-opus-5-5:medium (ANTHROPIC_API_KEY)
     openai:<model>                   uses OPENAI_API_KEY (and OPENAI_BASE_URL if set)
-    nvidia:<model>                   build.nvidia.com hosted endpoint, NVIDIA_API_KEY
-    vllm:<model>@<base_url>          self-hosted OpenAI-compatible server, ARMLAB_VLLM_KEY
+    cosmos[:<model>][@<base_url>]    self-hosted Cosmos Reason on Modal; model defaults to $ARMLAB_COSMOS_MODEL or
+                                     nvidia/Cosmos3-Nano, URL to $ARMLAB_COSMOS_URL or the deployed Modal app.
+                                     Optional endpoint password: ARMLAB_VLLM_KEY
+    vllm:<model>@<base_url>          any other OpenAI-compatible server, ARMLAB_VLLM_KEY
     """
     kind, _, rest = spec.partition(":")
     if kind == "anthropic":
@@ -231,9 +260,13 @@ def make_vlm(spec: str, **kw) -> VLM:
         return AnthropicVLM(model=model or "claude-opus-5-5", effort=effort or "medium", **kw)
     if kind == "openai":
         return OpenAICompatVLM(model=rest, base_url=os.environ.get("OPENAI_BASE_URL"), **kw)
-    if kind == "nvidia":
-        return OpenAICompatVLM(model=rest, base_url="https://integrate.api.nvidia.com/v1", api_key_env="NVIDIA_API_KEY", **kw)
+    if kind == "cosmos":
+        model, _, base = rest.partition("@")
+        return OpenAICompatVLM(model=model or cosmos_model(), base_url=base or cosmos_base_url(),
+                               api_key_env="ARMLAB_VLLM_KEY", **kw)
     if kind == "vllm":
         model, _, base = rest.partition("@")
         return OpenAICompatVLM(model=model, base_url=base, api_key_env="ARMLAB_VLLM_KEY", **kw)
+    if kind == "nvidia":
+        raise ValueError("the hosted build.nvidia.com Cosmos API is gone; use --vlm cosmos (self-hosted on Modal)")
     raise ValueError(f"unknown VLM spec {spec!r}")

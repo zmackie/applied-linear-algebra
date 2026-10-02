@@ -3,13 +3,13 @@
 1. `make-dataset`: renders a labelled benchmark from the MuJoCo sim. Plausible clips are normal
    physics (drops, placements, carries); implausible clips break physics on purpose (anti-gravity,
    teleporting, passing through the table, vanishing, floating, time reversal).
-2. `judge` / `evaluate`: asks a video VLM (Cosmos Reason 2 by default) whether each clip is
+2. `judge` / `evaluate`: asks a video VLM (self-hosted Cosmos 3 Nano by default) whether each clip is
    physically plausible and scores it against the labels.
 3. `filter`: splits a directory of generated clips into accepted/rejected before they reach training.
 
   python -m armlab.cosmos.physics_filter make-dataset --out data/physics --per-scenario 3
-  python -m armlab.cosmos.physics_filter evaluate data/physics --vlm nvidia:nvidia/cosmos-reason2-8b
-  python -m armlab.cosmos.physics_filter filter generated/ --vlm vllm:nvidia/Cosmos-Reason2-8B@https://...
+  python -m armlab.cosmos.physics_filter evaluate data/physics --vlm cosmos
+  python -m armlab.cosmos.physics_filter filter generated/ --vlm cosmos:nvidia/Cosmos3-Nano@https://<endpoint>/v1
 """
 from __future__ import annotations
 
@@ -189,7 +189,7 @@ def main(argv=None):
     for name in ("evaluate", "filter"):
         b = sub.add_parser(name)
         b.add_argument("path")
-        b.add_argument("--vlm", default="nvidia:nvidia/cosmos-reason2-8b")
+        b.add_argument("--vlm", default="cosmos")
         b.add_argument("--mode", choices=["native", "frames"], default=None)
     args = ap.parse_args(argv)
     if args.cmd == "make-dataset":
