@@ -2,7 +2,7 @@
 
 A small, runnable testbed for two things:
 
-1. **Testing claims like "GPT-6 Astra cracked RoboLab."** Put any vision-language model (Claude, GPT-6 Astra, Cosmos Reason) in a robot-arm control loop, using the two architectures from *GPT 6 Astra as an Embodied Policy* (Su et al., 2026), and measure success, Score, tokens and latency.
+1. **Testing claims like "GPT-6 Astra cracked RoboLab."** Put any vision-language model (Claude, GPT-6 Astra, Cosmos 3) in a robot-arm control loop, using the two architectures from *GPT 6 Astra as an Embodied Policy* (Su et al., 2026), and measure success, Score, tokens and latency.
 2. **Cosmos video apps:** a workplace safety monitor, an egocentric reasoning API, a physics-plausibility filter, and a sim-to-real data generator.
 
 Everything except the GPU pieces runs on a laptop CPU.
@@ -23,7 +23,9 @@ armlab/policy/     scripted oracle / "System 1", VLM clients, direct + hybrid VL
 armlab/eval/       episode loop + `armlab-eval` CLI (paused or realtime clock)
 armlab/cosmos/     video reasoner, safety monitor, FastAPI ego API, physics filter, Transfer exporter
 armlab/robolab/    RoboLab (Isaac Lab) inference client + runner for the same VLM policies
-modal_apps/        Modal apps: parallel sim evals, RoboLab on L40S, Cosmos Reason vLLM server, Cosmos Transfer on H100
+armlab/web/        phone-friendly results pages (runs, summary tables, videos, safety reports)
+armlab/doctor.py   `armlab-doctor`: which credentials and hosts this machine can reach
+modal_apps/        Modal apps: parallel sim evals, results page, daily safety cron, RoboLab on L40S, Cosmos 3 vLLM server, Cosmos Transfer on H100
 media/             demo videos
 ../notebooks/robot_eval.py   marimo notebook to browse runs and watch episodes
 ```
@@ -84,6 +86,8 @@ modal secret create armlab-llm ANTHROPIC_API_KEY=... OPENAI_API_KEY=...
 modal run modal_apps/armlab_eval.py --policy direct --vlm anthropic:claude-opus-5-5:medium --tasks all --seeds 0-9 --video
 ```
 
+Every Modal run lands on the `armlab-runs` volume and shows up on the results page (see "How to run from anywhere" below).
+
 ### On real RoboLab (Isaac Lab, GPU)
 
 `armlab/robolab/` runs the same policy against NVIDIA's RoboLab-120 benchmark through its absolute end-effector IK action space, with `--enable-gt-state` object poses as the "perception" input:
@@ -97,20 +101,22 @@ This path is **untested**: it was written against RoboLab's source with no GPU a
 
 ## 2. Cosmos apps
 
-Cosmos Reason 2 is reachable two ways:
-- **Hosted:** `--vlm nvidia:nvidia/cosmos-reason2-8b` with `NVIDIA_API_KEY` from build.nvidia.com. Uses frame sampling unless `--mode native`.
-- **Self-hosted on Modal:** `modal deploy modal_apps/cosmos_reason_vllm.py`, then `--vlm vllm:nvidia/Cosmos-Reason2-8B@https://<your-endpoint>/v1`. This sends the actual video.
+The Cosmos apps use **Cosmos 3** (`nvidia/Cosmos3-Nano`, served as its text "Reasoner"), self-hosted on Modal with vLLM. NVIDIA's hosted Cosmos Reason API on build.nvidia.com is gone, so there is no `nvidia:` option any more.
 
-Any other VLM (Claude, GPT) works too, via frame sampling.
-
-**Workplace safety monitor:** describes each clip, flags hazards with severity and writes a daily markdown report.
 ```sh
-armlab-safety path/to/clips/ --vlm nvidia:nvidia/cosmos-reason2-8b --site "Loading dock" --out reports/
+modal deploy modal_apps/cosmos_reason_vllm.py      # L40S; ARMLAB_COSMOS_GPU=H100 for more headroom
+```
+
+That serves `https://<workspace>--cosmos-reason-serve.modal.run/v1`. `--vlm cosmos` (the default for the safety monitor, video API and physics filter) finds it through your Modal token, or set `ARMLAB_COSMOS_URL`. It needs the Modal secret `huggingface` (HF_TOKEN). Cosmos3-Nano is released under OpenMDW-1.1 and is not gated on Hugging Face, so there is no license page to click through. The model is configurable: deploy with `ARMLAB_COSMOS_MODEL=<hf id>` and use the same env var (or `--vlm cosmos:<hf id>`) on the client. `ARMLAB_COSMOS_MODEL=nvidia/Cosmos-Reason2-8B` brings back the previous generation, which needs the NVIDIA Open Model License accepted on its HF page. Any other VLM (Claude, GPT) works too, via frame sampling.
+
+**Workplace safety monitor:** describes each clip, flags hazards with severity and writes a daily markdown report. On Modal it runs every morning (`modal_apps/armlab_safety_cron.py`) over clips you drop on the `armlab-runs` volume, and the report shows up on the results page.
+```sh
+armlab-safety path/to/clips/ --vlm cosmos --site "Loading dock" --out reports/
 ```
 
 **Egocentric reasoning API:** FastAPI service, video in, "what's happening + next action" out.
 ```sh
-ARMLAB_REASON_VLM=nvidia:nvidia/cosmos-reason2-8b uvicorn armlab.cosmos.api:app --port 8080
+ARMLAB_REASON_VLM=cosmos uvicorn armlab.cosmos.api:app --port 8080
 curl -F video=@clip.mp4 -F task="put the block in the bin" localhost:8080/v1/analyze
 ```
 
@@ -118,7 +124,7 @@ curl -F video=@clip.mp4 -F task="put the block in the bin" localhost:8080/v1/ana
 ```sh
 armlab-physics make-dataset --out data/physics --per-scenario 3     # plausible: drop, place, carry
                                                                    # implausible: antigravity, teleport, passthrough, vanish, floating, reverse
-armlab-physics evaluate data/physics --vlm nvidia:nvidia/cosmos-reason2-8b
+armlab-physics evaluate data/physics --vlm cosmos
 armlab-physics filter generated_clips/ --vlm ...                     # -> accepted/ and rejected/
 ```
 
@@ -129,21 +135,57 @@ modal run modal_apps/cosmos_transfer.py --export-dir exports/blocks0
 ```
 Then feed the outputs to `armlab-physics filter` to drop the ones with broken physics.
 
+## Where keys live / how to run from anywhere
+
+Model keys live **only** in Modal secrets. Anything you drive runs from (GitHub Actions, a laptop, a phone, an agent box) holds just a Modal token, so you can launch runs from anywhere without copying API keys around.
+
+| Where | Holds | Used by |
+|---|---|---|
+| Modal secret `armlab-llm` | `ANTHROPIC_API_KEY` (required), `OPENAI_API_KEY` (optional, GPT-6 Astra comparison) | `armlab_eval.py` direct/hybrid episodes, `armlab_safety_cron.py`, `robolab_eval.py` |
+| Modal secret `huggingface` | `HF_TOKEN` (required for all Cosmos work) | `cosmos_reason_vllm.py` (Cosmos 3), `cosmos_transfer.py` |
+| your shell at deploy time (optional) | `ARMLAB_VLLM_KEY`: password for the Cosmos endpoint; `ARMLAB_RESULTS_KEY`: key for the results page | stored as Modal secrets by `modal deploy` |
+| GitHub repo secrets | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | the `run-eval` workflow |
+| laptop / agent box | a Modal token (`modal token new`, or the two env vars) | `modal run` / `modal deploy` |
+
+```sh
+modal secret create armlab-llm ANTHROPIC_API_KEY=... OPENAI_API_KEY=...
+modal secret create huggingface HF_TOKEN=...
+```
+
+**Check a machine:** `make doctor` (or `armlab-doctor`, `armlab-doctor --json`) reports whether a Modal token is configured, whether api.modal.com and GitHub are reachable, whether the Modal secrets, the `armlab-runs` volume and the deployed apps exist, and whether model keys are sitting in the local shell. It never prints a secret value, and it still runs (and says what is missing) with no token at all. `modal run modal_apps/armlab_eval.py --check-keys` asks Modal which keys `armlab-llm` holds (names only).
+
+**Deploy once:**
+
+```sh
+cd robotics
+modal deploy modal_apps/armlab_results.py        # results page: https://<workspace>--armlab-results-web.modal.run
+modal deploy modal_apps/armlab_safety_cron.py    # daily safety report at 07:00 America/New_York
+modal deploy modal_apps/cosmos_reason_vllm.py    # Cosmos 3 endpoint (GPU only while in use)
+```
+
+**Run from:**
+
+- **GitHub (phone-friendly):** Actions > `run-eval` > Run workflow, pick a policy (`oracle` needs no model keys), tasks, seeds, clock and video. Or `gh workflow run run-eval.yml -f policy=oracle -f seeds=0`. The job summary shows the score table and a link to the results page; `results.csv`, `summary.txt` and videos are attached as an artifact.
+- **Any machine with a Modal token:** `modal run modal_apps/armlab_eval.py --policy oracle --seeds 0 --video` (`--download` also copies the videos back).
+- **Watch:** open the results page on your phone: runs newest first, the summary table per run, and videos that play inline. `/safety` lists the daily safety reports with their clips.
+
+Volume layout (`armlab-runs`): `<run>/summary.txt|results.csv|results.json|config.json`, `<run>/<task>/seed<k>/{video.mp4,decisions.jsonl,result.json}`, `_safety/clips/inbox/` (drop clips with `modal volume put armlab-runs clips/ _safety/clips/inbox/`), `_safety/clips/processed/<date>/`, `_safety/reports/safety-<date>.md`.
+
+The results page URL is public but unguessable and shows only sim videos and scores. To lock it, deploy with `ARMLAB_RESULTS_KEY=...` and open `/?key=...` once per browser.
+
 ## Accounts and keys
 
 | Need | For | Where |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | Claude as the policy or judge | console.anthropic.com |
-| `OPENAI_API_KEY` + the GPT-6 Astra model id | the GPT-6 Astra comparison | platform.openai.com |
-| `NVIDIA_API_KEY` | hosted Cosmos Reason 2 | build.nvidia.com |
-| Modal account (`modal token new`) | parallel evals, RoboLab GPU, Cosmos serving and Transfer | modal.com |
-| Hugging Face token with the NVIDIA Open Model License accepted | Cosmos-Reason2 / Cosmos-Transfer2.5 weights on Modal | huggingface.co |
+| `ANTHROPIC_API_KEY` (required) | Claude as the policy or judge | console.anthropic.com, stored in Modal secret `armlab-llm` |
+| `OPENAI_API_KEY` (optional) + the GPT-6 Astra model id | the GPT-6 Astra comparison | platform.openai.com, stored in `armlab-llm` |
+| Modal account (`modal token new`) | everything in the cloud: evals, results page, safety cron, RoboLab GPU, Cosmos serving and Transfer | modal.com |
+| Hugging Face token (`HF_TOKEN`) | Cosmos 3 / Cosmos-Transfer2.5 weights on Modal; accept the NVIDIA Open Model License for Cosmos-Transfer2.5 (and Cosmos-Reason2 if you switch back) | huggingface.co, stored in Modal secret `huggingface` |
 
-Modal secrets used: `armlab-llm` (LLM keys) and `huggingface` (`HF_TOKEN`).
-
-Rough GPU sizing: RoboLab needs an RTX-class GPU with 48 GB (L40S). Cosmos Reason 2-8B fits an L40S. Cosmos Transfer 2.5 needs ~65 GB (H100 80 GB) and takes several minutes per 93-frame clip.
+Rough GPU sizing: RoboLab needs an RTX-class GPU with 48 GB (L40S). Cosmos3-Nano (16B; ~31 GB of bf16 weights in the checkpoint) is set up for an L40S, with H100 as the option if memory gets tight. Cosmos Transfer 2.5 needs ~65 GB (H100 80 GB) and takes several minutes per 93-frame clip.
 
 ## What has and has not been verified
 
-- Verified here (CPU, no keys): the sim, IK and grasping; the oracle solves all 5 tasks; video recording; both VLM policies end to end with a scripted fake model (parsing, pixel grounding, locate queries, accept/correct); the realtime-clock latency effect; the physics dataset renders; the Transfer control export; the safety report, API and judge logic with a fake model; the RoboLab client's pose math against a stub.
-- Not verified (needs keys or a GPU): live Claude, GPT and Cosmos calls; the Modal apps; RoboLab on Isaac Lab; Cosmos Transfer inference.
+- Verified here (CPU, no keys): the sim, IK and grasping; the oracle solves all 5 tasks; video recording; both VLM policies end to end with a scripted fake model (parsing, pixel grounding, locate queries, accept/correct); the realtime-clock latency effect; the physics dataset renders; the Transfer control export; the safety report, API and judge logic with a fake model; the RoboLab client's pose math against a stub; `armlab-doctor` with and without a token; the results page against a fake runs directory.
+- Verified on Modal (Oct 2026): `armlab_eval.py` with the oracle (10/10) and with live Claude in both the direct and hybrid architectures; the results page (runs, tables, inline video with HTTP Range); the safety cron end to end with Cosmos3-Nano served by `cosmos_reason_vllm.py` on an L40S.
+- Not verified: the `run-eval` GitHub workflow (needs the MODAL_TOKEN_* repo secrets); GPT-6 Astra; the ego API and physics filter against the live Cosmos 3 endpoint (same client path as the safety monitor); RoboLab on Isaac Lab; Cosmos Transfer inference.

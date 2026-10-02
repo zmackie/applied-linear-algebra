@@ -1,4 +1,4 @@
-"""Ask a video-capable VLM (Cosmos Reason 2 by default) questions about a clip.
+"""Ask a video-capable VLM (self-hosted Cosmos 3 Nano by default) questions about a clip.
 
 Two input modes:
   native  - send the mp4 itself (`video_url`), the way Cosmos Reason is meant to be served (vLLM / NIM).
@@ -15,7 +15,7 @@ import numpy as np
 
 from ..policy.vlm import VLM, OpenAICompatVLM, VideoPart, extract_json
 
-# From nvidia-cosmos/cosmos-reason2 (cosmos_reason2_utils/text.py).
+# From nvidia-cosmos/cosmos-reason2 (cosmos_reason2_utils/text.py); kept for Cosmos 3, which also emits <think> blocks.
 COSMOS_SYSTEM_PROMPT = "You are a helpful assistant."
 COSMOS_REASONING_PROMPT = """Answer the question using the following format:
 
@@ -119,7 +119,7 @@ def make_reasoner(spec: str, **kw) -> VideoReasoner:
     from ..policy.vlm import make_vlm
 
     vlm_kw = {}
-    if spec.startswith(("nvidia:", "vllm:")):
+    if spec.split(":")[0].split("@")[0] in ("cosmos", "vllm"):
         vlm_kw["json_mode"] = False
     return VideoReasoner(make_vlm(spec, **vlm_kw), **kw)
 

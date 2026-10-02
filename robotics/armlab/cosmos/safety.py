@@ -1,6 +1,6 @@
 """Workplace safety monitor: describe each camera clip, flag hazards, write a daily report.
 
-  armlab-safety clips/ --vlm nvidia:nvidia/cosmos-reason2-8b --site "Assembly cell 3" --out reports/
+  armlab-safety clips/ --vlm cosmos --site "Assembly cell 3" --out reports/
 """
 from __future__ import annotations
 
@@ -77,10 +77,62 @@ def daily_report(results: list[dict], site: str, date: dt.date | None = None) ->
     return "\n".join(lines)
 
 
+def write_report(results: list[dict], site: str, out: str | Path, date: dt.date | None = None) -> Path:
+    """Write safety-<date>.json and safety-<date>.md into `out`; returns the markdown path."""
+    date = date or dt.date.today()
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    day = date.isoformat()
+    (out / f"safety-{day}.json").write_text(json.dumps(results, indent=2))
+    md = out / f"safety-{day}.md"
+    md.write_text(daily_report(results, site, date))
+    return md
+
+
+def process_inbox(root: str | Path, reasoner, site: str, date: dt.date | None = None) -> Path:
+    """Daily job over a runs root (the `armlab-runs` volume on Modal): analyze every clip in
+    `_safety/clips/inbox/`, write `_safety/reports/safety-<date>.md`, and move the clips to
+    `_safety/clips/processed/<date>/` so the results page can play them next to the report.
+    Writes a report even when the inbox is empty, so a missing report means the job did not run.
+    `reasoner` may be a VideoReasoner or a zero-arg factory; the factory is only called if there are clips,
+    so an empty day never wakes the GPU endpoint."""
+    from ..web.results import SAFETY_INBOX, SAFETY_PROCESSED, SAFETY_REPORTS
+
+    root = Path(root)
+    date = date or dt.date.today()
+    inbox = root / SAFETY_INBOX
+    inbox.mkdir(parents=True, exist_ok=True)
+    done = root / SAFETY_PROCESSED / date.isoformat()
+    results = []
+    clips = sorted(inbox.glob("*.mp4"))
+    if clips and not isinstance(reasoner, VideoReasoner):
+        reasoner = reasoner()
+    for c in clips:
+        try:
+            r = analyze_clip(reasoner, c, site)
+        except Exception as e:  # one bad clip should not sink the report
+            r = {"summary": f"analysis failed: {type(e).__name__}: {e}", "people": None, "hazards": [],
+                 "recommended_actions": [], "error": True}
+        done.mkdir(parents=True, exist_ok=True)
+        dest = done / c.name
+        c.replace(dest)
+        r["clip"] = str(dest.relative_to(root))
+        print(f"{c.name}: {len(r['hazards'])} hazards  {r.get('summary', '')[:100]}")
+        results.append(r)
+    report_dir = root / SAFETY_REPORTS
+    prev = report_dir / f"safety-{date.isoformat()}.json"
+    if prev.is_file():  # a second run on the same day appends to that day's report
+        try:
+            results = json.loads(prev.read_text()) + results
+        except ValueError:
+            pass
+    return write_report(results, site, report_dir, date)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("clips", help="directory of .mp4 clips (or a single clip)")
-    ap.add_argument("--vlm", default="nvidia:nvidia/cosmos-reason2-8b")
+    ap.add_argument("--vlm", default="cosmos")
     ap.add_argument("--mode", choices=["native", "frames"], default=None)
     ap.add_argument("--site", default="an industrial work area")
     ap.add_argument("--out", default="reports")
@@ -93,12 +145,7 @@ def main(argv=None):
         r = analyze_clip(reasoner, c, args.site)
         print(f"{c.name}: {len(r['hazards'])} hazards  {r.get('summary', '')[:100]}")
         results.append(r)
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    day = dt.date.today().isoformat()
-    (out / f"safety-{day}.json").write_text(json.dumps(results, indent=2))
-    (out / f"safety-{day}.md").write_text(daily_report(results, args.site))
-    print(f"Report: {out / f'safety-{day}.md'}")
+    print(f"Report: {write_report(results, args.site, args.out)}")
 
 
 if __name__ == "__main__":

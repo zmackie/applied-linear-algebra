@@ -180,6 +180,15 @@ def parse_seeds(s: str) -> list[int]:
     return out
 
 
+def write_results_csv(path: Path, results: list[EpisodeResult]) -> None:
+    fields = [*EpisodeResult.__dataclass_fields__, "correction_fraction"]
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fields)
+        w.writeheader()
+        for r in results:
+            w.writerow(asdict(r) | {"steps_by_source": json.dumps(r.steps_by_source), "correction_fraction": round(r.correction_fraction, 4)})
+
+
 def summarize(results: list[EpisodeResult]) -> str:
     lines = [f"{'task':<18}{'success':>10}{'score':>8}{'decisions':>11}{'model s/dec':>13}{'tokens':>12}{'corr%':>7}"]
     by_task: dict[str, list[EpisodeResult]] = {}
@@ -200,7 +209,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--policy", choices=["oracle", "system1", "direct", "hybrid"], default="oracle")
     ap.add_argument("--vlm", default="anthropic:claude-opus-5-5:medium",
-                    help="anthropic[:model[:effort]] | openai:<model> | nvidia:<model> | vllm:<model>@<url>")
+                    help="anthropic[:model[:effort]] | openai:<model> | cosmos[:<model>] | vllm:<model>@<url>")
     ap.add_argument("--tasks", default="all", help=f"comma list or 'all': {', '.join(TASKS)}")
     ap.add_argument("--seeds", default="0-4")
     ap.add_argument("--clock", choices=["paused", "realtime"], default="paused")
@@ -227,11 +236,7 @@ def main(argv=None):
             results.append(r)
             print(f"{t} seed {s}: {'SUCCESS' if r.success else 'fail'} score {r.score:.0f} "
                   f"({r.decisions} decisions, {r.sim_time_s:.1f}s sim, {r.wall_time_s:.0f}s wall){' ' + r.error if r.error else ''}")
-    with open(out_dir / "results.csv", "w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=[*asdict(results[0]).keys(), "correction_fraction"])
-        w.writeheader()
-        for r in results:
-            w.writerow(asdict(r) | {"steps_by_source": json.dumps(r.steps_by_source), "correction_fraction": round(r.correction_fraction, 4)})
+    write_results_csv(out_dir / "results.csv", results)
     summary = summarize(results)
     (out_dir / "summary.txt").write_text(summary + "\n")
     print("\n" + summary + f"\n\nResults in {out_dir}")

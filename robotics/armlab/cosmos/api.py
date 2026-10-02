@@ -1,6 +1,6 @@
 """Egocentric reasoning API: POST a video, get back what is happening and what to do next.
 
-  ARMLAB_REASON_VLM=nvidia:nvidia/cosmos-reason2-8b uvicorn armlab.cosmos.api:app --port 8080
+  ARMLAB_REASON_VLM=cosmos uvicorn armlab.cosmos.api:app --port 8080
 
   curl -F video=@clip.mp4 -F task="put the cup in the sink" localhost:8080/v1/analyze
 """
@@ -42,7 +42,7 @@ class Analysis(BaseModel):
 
 @lru_cache(maxsize=1)
 def get_reasoner() -> VideoReasoner:
-    return make_reasoner(os.environ.get("ARMLAB_REASON_VLM", "nvidia:nvidia/cosmos-reason2-8b"),
+    return make_reasoner(os.environ.get("ARMLAB_REASON_VLM", "cosmos"),
                          mode=os.environ.get("ARMLAB_REASON_MODE") or None)
 
 
@@ -51,7 +51,7 @@ app = FastAPI(title="armlab egocentric reasoning API", version="0.1.0")
 
 @app.get("/health")
 def health():
-    return {"ok": True, "model": os.environ.get("ARMLAB_REASON_VLM", "nvidia:nvidia/cosmos-reason2-8b")}
+    return {"ok": True, "model": os.environ.get("ARMLAB_REASON_VLM", "cosmos")}
 
 
 @app.post("/v1/analyze", response_model=Analysis)
