@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# armlab
+robotics/.assets/
+robotics/runs/
+*.egg-info/
