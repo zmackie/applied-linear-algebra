@@ -1,0 +1,35 @@
+[project]
+name = "armlab"
+version = "0.1.0"
+description = "Simulated robot-arm testbed for VLM/LLM embodied policies, plus Cosmos-based video reasoning apps"
+requires-python = ">=3.10"
+dependencies = [
+    "mujoco>=3.3",
+    "numpy",
+    "pillow",
+    "imageio",
+    "imageio-ffmpeg",
+    "httpx",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic>=0.60", "openai>=1.60"]
+api = ["fastapi", "uvicorn", "python-multipart"]
+cloud = ["modal"]
+dev = ["pytest"]
+
+[project.scripts]
+armlab-eval = "armlab.eval.runner:main"
+armlab-safety = "armlab.cosmos.safety:main"
+armlab-physics = "armlab.cosmos.physics_filter:main"
+armlab-transfer-export = "armlab.cosmos.transfer_export:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["armlab"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
