@@ -153,6 +153,8 @@ class OpenAICompatVLM(VLM):
         if not key:
             raise MissingCredentials(f"Set {api_key_env} to use {model}")
         self.client = OpenAI(api_key=key, base_url=base_url, timeout=timeout_s, max_retries=3)
+        # OpenAI's own API uses max_completion_tokens; vLLM / NIM servers accept max_tokens.
+        self.token_param = "max_tokens" if base_url else "max_completion_tokens"
         self.model = model
         self.json_mode = json_mode
         self.reasoning_effort = reasoning_effort
@@ -177,7 +179,7 @@ class OpenAICompatVLM(VLM):
             sys_text += "\n\nRespond with a single JSON object matching this JSON schema:\n" + json.dumps(schema)
         kwargs = dict(model=self.model, messages=[{"role": "system", "content": sys_text},
                                                   {"role": "user", "content": self._content(parts)}],
-                      max_completion_tokens=max_tokens)
+                      **{self.token_param: max_tokens})
         if schema is not None and self.json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         if self.reasoning_effort:

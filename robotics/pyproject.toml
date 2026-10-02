@@ -20,6 +20,9 @@ dev = ["pytest"]
 
 [project.scripts]
 armlab-eval = "armlab.eval.runner:main"
+armlab-safety = "armlab.cosmos.safety:main"
+armlab-physics = "armlab.cosmos.physics_filter:main"
+armlab-transfer-export = "armlab.cosmos.transfer_export:main"
 
 [build-system]
 requires = ["hatchling"]

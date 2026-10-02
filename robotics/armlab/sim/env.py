@@ -26,9 +26,10 @@ WORKSPACE = {"x": (0.2, 0.8), "y": (-0.5, 0.5), "z": (0.008, 0.6)}
 
 CAMERAS = {
     # name: (pos, lookat, fovy, description shown to the policy)
-    "head": ((0.48, 0.0, 1.05), (0.48, 0.0, 0.0), 52,
-             "Fixed camera 1.05 m above the table looking straight down. Image up = away from the robot base (+x), image left = robot's left (+y). The robot base is just below the bottom edge."),
+    "head": ((0.5, 0.0, 0.82), (0.5, 0.0, 0.0), 45,
+             "Fixed camera 0.82 m above the table looking straight down. Image up = away from the robot base (+x), image left = robot's left (+y). The robot base is just below the bottom edge."),
     "front": ((1.35, 0.75, 0.85), (0.45, 0.0, 0.08), 45, "Third-person viewing camera (video only)."),
+    "closeup": ((1.05, -0.62, 0.38), (0.45, -0.05, 0.14), 50, "Close third-person camera (video only)."),
 }
 
 

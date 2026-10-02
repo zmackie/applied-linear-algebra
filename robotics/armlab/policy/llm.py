@@ -118,12 +118,12 @@ def annotate_head(obs: Observation, candidate: list[Waypoint] | None = None, gri
             a, b = proj("head", (x, GRID_Y[0], 0)), proj("head", (x, GRID_Y[-1], 0))
             if a and b:
                 d.line([a, b], fill=(255, 255, 255, 70), width=1)
-                d.text((b[0] + 3, b[1] - 7), f"x={x:.1f}", font=f, fill=(255, 255, 255, 200))
+                d.text((b[0] + 3, b[1] - 14), f"x={x:.1f}", font=f, fill=(255, 255, 255, 200))
         for y in GRID_Y:
             a, b = proj("head", (GRID_X[0], y, 0)), proj("head", (GRID_X[-1], y, 0))
             if a and b:
                 d.line([a, b], fill=(255, 255, 255, 70), width=1)
-                d.text((b[0] - 14, b[1] - 16), f"y={y:+.1f}", font=f, fill=(255, 255, 255, 200))
+                d.text((a[0] - 12, a[1] + 2), f"y{y:+.1f}", font=f, fill=(255, 255, 255, 200))
     e = proj("head", obs.eef_xyz)
     if e:
         d.line([(e[0] - 9, e[1]), (e[0] + 9, e[1])], fill=(255, 0, 255, 255), width=2)
