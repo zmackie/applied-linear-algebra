@@ -80,6 +80,42 @@ def test_physics_judge_and_score(clip):
     assert m["accuracy"] == 0.5 and m["reject_precision"] == 0.5 and m["reject_recall"] == 0.5
 
 
+def test_physics_evaluate_retries_and_skips_failed_clips(clip, tmp_path, monkeypatch):
+    import shutil
+
+    monkeypatch.setattr(physics_filter.time, "sleep", lambda s: None)
+    ds = tmp_path / "ds"
+    ds.mkdir()
+    rows = [("drop_0.mp4", "drop", True), ("vanish_0.mp4", "vanish", False), ("broken_0.mp4", "teleport", False)]
+    for name, _, _ in rows:
+        shutil.copy(clip, ds / name)
+    (ds / "manifest.jsonl").write_text("".join(json.dumps({"clip": c, "scenario": s, "plausible": p}) + "\n"
+                                               for c, s, p in rows))
+
+    def respond(system, parts):
+        return {"plausible": True, "confidence": 0.9, "violations": []}
+
+    r = VideoReasoner(ScriptedVLM(respond))
+    real_judge = physics_filter.judge
+    flaky = {"vanish_0.mp4": 1}
+
+    def judge(reasoner, path):
+        if path.name == "broken_0.mp4":
+            raise RuntimeError("endpoint down")
+        if flaky.get(path.name):
+            flaky[path.name] -= 1
+            raise RuntimeError("cold start")
+        return real_judge(reasoner, path)
+
+    monkeypatch.setattr(physics_filter, "judge", judge)
+    out = tmp_path / "eval.json"
+    m = physics_filter.evaluate(ds, r, out)
+    doc = json.loads(out.read_text())
+    assert m["n"] == 2 and m["errors"] == 1 and m["mode"] == "frames"
+    assert [x["pred_plausible"] for x in doc["results"]] == [True, True, None]
+    assert m["reject_recall"] == 0.0 and m["false_reject_rate"] == 0.0
+
+
 def test_transfer_export(tmp_path):
     from armlab.cosmos import transfer_export
 
