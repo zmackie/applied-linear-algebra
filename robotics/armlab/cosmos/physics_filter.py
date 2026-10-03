@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import time
 from pathlib import Path
 
 import mujoco
@@ -133,16 +134,31 @@ def judge(reasoner: VideoReasoner, clip: Path) -> dict:
             "latency_s": round(out["usage"].latency_s, 2)}
 
 
-def evaluate(dataset: Path, reasoner: VideoReasoner) -> dict:
+def evaluate(dataset: Path, reasoner: VideoReasoner, out: Path | None = None, retries: int = 2) -> dict:
     rows = [json.loads(line) for line in (dataset / "manifest.jsonl").read_text().splitlines() if line.strip()]
     results = []
     for r in rows:
-        v = judge(reasoner, dataset / r["clip"])
-        results.append(r | {"pred_plausible": v["plausible"], "confidence": v["confidence"], "violations": v["violations"]})
+        v, err = None, None
+        for attempt in range(retries + 1):  # e.g. a scale-from-zero endpoint dropping queued requests
+            try:
+                v = judge(reasoner, dataset / r["clip"])
+                break
+            except Exception as e:  # one bad request should not sink the whole benchmark
+                err = e
+                time.sleep(5 * (attempt + 1))
+        if v is None:
+            print(f"  ERR  {r['clip']}: {type(err).__name__}: {str(err)[:200]}")
+            results.append(r | {"pred_plausible": None, "error": f"{type(err).__name__}: {err}"[:500]})
+            continue
+        results.append(r | {"pred_plausible": v["plausible"], "confidence": v["confidence"], "violations": v["violations"],
+                            "latency_s": v["latency_s"]})
         mark = "ok " if v["plausible"] == r["plausible"] else "MISS"
         print(f"  {mark} {r['clip']:<20} label={'plausible' if r['plausible'] else 'IMPLAUSIBLE':<11} pred={'plausible' if v['plausible'] else 'IMPLAUSIBLE'}")
-    metrics = score(results)
-    (dataset / "eval_results.json").write_text(json.dumps({"metrics": metrics, "results": results}, indent=2))
+    metrics = score([r for r in results if r["pred_plausible"] is not None])
+    metrics["errors"] = sum(1 for r in results if r["pred_plausible"] is None)
+    metrics["model"] = getattr(reasoner.vlm, "name", "")
+    metrics["mode"] = reasoner.mode
+    (out or dataset / "eval_results.json").write_text(json.dumps({"metrics": metrics, "results": results}, indent=2))
     return metrics
 
 
@@ -191,13 +207,16 @@ def main(argv=None):
         b.add_argument("path")
         b.add_argument("--vlm", default="cosmos")
         b.add_argument("--mode", choices=["native", "frames"], default=None)
+        b.add_argument("--fps", type=float, default=4.0, help="native mode: frames per second the server samples")
+        if name == "evaluate":
+            b.add_argument("--out", default=None, help="results JSON (default <path>/eval_results.json)")
     args = ap.parse_args(argv)
     if args.cmd == "make-dataset":
         print(make_dataset(Path(args.out), args.per_scenario))
         return
-    reasoner = make_reasoner(args.vlm, mode=args.mode)
+    reasoner = make_reasoner(args.vlm, mode=args.mode, fps=args.fps)
     if args.cmd == "evaluate":
-        print(json.dumps(evaluate(Path(args.path), reasoner), indent=2))
+        print(json.dumps(evaluate(Path(args.path), reasoner, Path(args.out) if args.out else None), indent=2))
     else:
         filter_dir(Path(args.path), reasoner)
 

@@ -127,6 +127,13 @@ armlab-physics make-dataset --out data/physics --per-scenario 3     # plausible:
 armlab-physics evaluate data/physics --vlm cosmos
 armlab-physics filter generated_clips/ --vlm ...                     # -> accepted/ and rejected/
 ```
+On Modal, with keys only in Modal secrets (dataset and verdicts land on the `armlab-runs` volume under `_physics/`):
+```sh
+modal run modal_apps/armlab_physics.py --make --per-scenario 5
+modal run modal_apps/armlab_physics.py --vlm cosmos                                  # or --mode frames
+modal run modal_apps/armlab_physics.py --vlm anthropic:claude-opus-5-5:medium
+```
+First benchmark (Oct 2026, 45 clips): Claude Opus 5.5 (frames) accuracy 0.96, reject recall 1.00, false-reject rate 0.13; Cosmos3-Nano 0.40 (native) / 0.47 (frames), reject recall 0.10 / 0.20. Cosmos3-Nano labels nearly everything plausible, so use Claude as the gate for now.
 
 **Sim-to-real data generator:** exports RGB + depth + segmentation of a rollout as Cosmos-Transfer2.5 inputs, with several appearance prompts (lab, warehouse, kitchen, cleanroom, outdoor), then runs them on an H100.
 ```sh
@@ -187,5 +194,5 @@ Rough GPU sizing: RoboLab needs an RTX-class GPU with 48 GB (L40S). Cosmos3-Nano
 ## What has and has not been verified
 
 - Verified here (CPU, no keys): the sim, IK and grasping; the oracle solves all 5 tasks; video recording; both VLM policies end to end with a scripted fake model (parsing, pixel grounding, locate queries, accept/correct); the realtime-clock latency effect; the physics dataset renders; the Transfer control export; the safety report, API and judge logic with a fake model; the RoboLab client's pose math against a stub; `armlab-doctor` with and without a token; the results page against a fake runs directory.
-- Verified on Modal (Oct 2026): `armlab_eval.py` with the oracle (10/10) and with live Claude in both the direct and hybrid architectures; the results page (runs, tables, inline video with HTTP Range); the safety cron end to end with Cosmos3-Nano served by `cosmos_reason_vllm.py` on an L40S.
-- Not verified: the `run-eval` GitHub workflow (needs the MODAL_TOKEN_* repo secrets); GPT-6 Astra; the ego API and physics filter against the live Cosmos 3 endpoint (same client path as the safety monitor); RoboLab on Isaac Lab; Cosmos Transfer inference.
+- Verified on Modal (Oct 2026): `armlab_eval.py` with the oracle (10/10) and with live Claude in both the direct and hybrid architectures (full 5 tasks x 5 seeds: direct 24/25, hybrid 25/25 paused; direct 1/10 on conveyor + blocks with `--clock realtime`); the results page (runs, tables, inline video with HTTP Range); the safety cron end to end with Cosmos3-Nano served by `cosmos_reason_vllm.py` on an L40S; the ego API (`/v1/analyze`) against the live Cosmos3-Nano endpoint, with native `video_url` input (no `--mode frames` needed); the physics filter benchmark (`modal_apps/armlab_physics.py`) with Cosmos3-Nano and Claude; the `run-eval` GitHub workflow (run 37065442935, oracle, passed).
+- Not verified: GPT-6 Astra; Cosmos Transfer inference.

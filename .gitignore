@@ -221,3 +221,4 @@ __marimo__/
 robotics/.assets/
 robotics/runs/
 *.egg-info/
+robotics/data/
