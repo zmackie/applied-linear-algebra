@@ -97,7 +97,9 @@ modal secret create armlab-llm ANTHROPIC_API_KEY=...
 modal run modal_apps/robolab_eval.py --tasks BananaInBowlTask,RubiksCubeAndBananaTask --vlm anthropic:claude-opus-5-5:medium --num-runs 5
 ```
 
-This path is **untested**: it was written against RoboLab's source with no GPU available. Expect to fix things on the first build. It needs an RTX-class GPU (L40S), not A100/H100.
+Verified on Modal L40S (NIM-361, 2026-10-03): `--tasks paper10 --num-runs 5` runs the report's 10-task subset, one container per task. Add `--publish-as <name>` to copy the episodes and viewport videos to the `armlab-runs` volume so they show up on the results page (`--publish-only <robolab-runs folders>` republishes existing runs). It needs an RTX-class GPU (L40S), not A100/H100.
+
+Known infra issue: Isaac Sim 5.0 (isaac-lab 2.2.0) crashes during GPU init on Modal hosts running the R610 driver (610.57.04: Warp "CUDA error 36", breakpad dump, hang). `evaluate` checks `nvidia-smi` first and, on an unsupported driver or a startup crash, stops that container taking inputs and fails, so Modal retries on another host (R580 hosts work).
 
 ## 2. Cosmos apps
 
