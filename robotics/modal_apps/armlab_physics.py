@@ -16,7 +16,6 @@ launching machine needs only a Modal token. Everything lands on the `armlab-runs
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 
@@ -42,9 +41,7 @@ image = (
 
 app = modal.App("armlab-physics", image=image)
 runs = modal.Volume.from_name("armlab-runs", create_if_missing=True)
-secrets = [modal.Secret.from_name("armlab-llm")]
-if os.environ.get("ARMLAB_VLLM_KEY"):
-    secrets.append(modal.Secret.from_dict({"ARMLAB_VLLM_KEY": os.environ["ARMLAB_VLLM_KEY"]}))
+secrets = [modal.Secret.from_name("armlab-llm"), modal.Secret.from_name("armlab-vllm")]  # model keys + Cosmos key
 
 
 @app.function(volumes={"/runs": runs}, timeout=3600, cpu=4.0, memory=8192)

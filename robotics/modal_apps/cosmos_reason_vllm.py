@@ -5,8 +5,15 @@ Default model: nvidia/Cosmos3-Nano (16B Mixture-of-Transformers) loaded as the t
 is gone, so the safety monitor, ego video API and physics filter all call this endpoint (`--vlm cosmos`).
 
 Keys: Modal secret `huggingface` with HF_TOKEN (required for all Cosmos work; Cosmos3-Nano is OpenMDW-1.1 and not
-gated, Cosmos-Reason2 needs the NVIDIA Open Model License accepted on its HF page). If ARMLAB_VLLM_KEY is set in your
-shell when you deploy, the endpoint requires that key as a bearer token.
+gated, Cosmos-Reason2 needs the NVIDIA Open Model License accepted on its HF page), and Modal secret `armlab-vllm`
+with ARMLAB_VLLM_KEY: the endpoint always requires it as a bearer token (vLLM --api-key), so the public URL is useless
+without it. Create it once without ever printing the value:
+
+  python -c "import secrets, modal; modal.Secret.objects.create('armlab-vllm', {'ARMLAB_VLLM_KEY': secrets.token_hex(32)})"
+
+Clients get the key without copying it anywhere: Modal apps mount the `armlab-vllm` secret, and local clients
+(`--vlm cosmos`) fetch it from this app's `api_key` function with the caller's Modal token (see
+armlab.policy.vlm.cosmos_api_key); it is held in memory only.
 
   modal deploy modal_apps/cosmos_reason_vllm.py                                  # Cosmos3-Nano on an L40S
   ARMLAB_COSMOS_GPU=H100 modal deploy modal_apps/cosmos_reason_vllm.py           # faster / more KV-cache headroom
@@ -55,6 +62,7 @@ else:  # Cosmos-Reason2 (Qwen3-VL based) runs on stock vLLM
 image = image.env({"HF_HUB_ENABLE_HF_TRANSFER": "1", "ARMLAB_COSMOS_MODEL": MODEL, "VLLM_USE_DEEP_GEMM": "0"})
 
 app = modal.App(os.environ.get("ARMLAB_COSMOS_APP", "cosmos-reason"), image=image)
+vllm_key = modal.Secret.from_name("armlab-vllm")  # ARMLAB_VLLM_KEY
 hf_cache = modal.Volume.from_name("hf-cache", create_if_missing=True)
 vllm_cache = modal.Volume.from_name("vllm-cache", create_if_missing=True)
 
@@ -74,8 +82,7 @@ def serve_command(model: str, port: int = PORT, api_key: str | None = None) -> l
 
 @app.function(
     gpu=GPU,
-    secrets=[modal.Secret.from_name("huggingface")]
-    + ([modal.Secret.from_dict({"ARMLAB_VLLM_KEY": os.environ["ARMLAB_VLLM_KEY"]})] if os.environ.get("ARMLAB_VLLM_KEY") else []),
+    secrets=[modal.Secret.from_name("huggingface"), vllm_key],
     volumes={"/root/.cache/huggingface": hf_cache, "/root/.cache/vllm": vllm_cache},
     timeout=60 * 60,
     scaledown_window=10 * 60,
@@ -84,4 +91,14 @@ def serve_command(model: str, port: int = PORT, api_key: str | None = None) -> l
 @modal.web_server(port=PORT, startup_timeout=25 * 60)
 def serve():
     model = os.environ.get("ARMLAB_COSMOS_MODEL", MODEL)
-    subprocess.Popen(serve_command(model, api_key=os.environ.get("ARMLAB_VLLM_KEY")))
+    key = os.environ.get("ARMLAB_VLLM_KEY")
+    if not key:  # never serve the GPU endpoint unauthenticated
+        raise RuntimeError("Modal secret armlab-vllm must provide ARMLAB_VLLM_KEY")
+    subprocess.Popen(serve_command(model, api_key=key))
+
+
+@app.function(image=modal.Image.from_registry("python:3.11-slim-bookworm"), secrets=[vllm_key], timeout=60)
+def api_key() -> str:
+    """The endpoint's bearer key, for clients holding a Modal token for this workspace (the same people who could
+    read or replace the secret anyway). Callers keep it in memory; never log it."""
+    return os.environ["ARMLAB_VLLM_KEY"]
