@@ -42,10 +42,17 @@ image = (
 
 app = modal.App("armlab-robolab", image=image)
 runs = modal.Volume.from_name("robolab-runs", create_if_missing=True)
+results_vol = modal.Volume.from_name("armlab-runs", create_if_missing=True)  # served by modal_apps/armlab_results.py
 
 
+class KitStartupCrash(RuntimeError):
+    pass
+
+
+# Some L40S hosts crash Kit while it initialises the GPU (breakpad dump before the first episode, then the process
+# hangs instead of exiting). Treat that as an infrastructure failure: kill it and let Modal retry on another host.
 @app.function(gpu="L40S", secrets=[modal.Secret.from_name("armlab-llm")], volumes={"/runs": runs},
-              timeout=6 * 3600, memory=32768)
+              timeout=6 * 3600, memory=32768, retries=modal.Retries(max_retries=2, initial_delay=5.0))
 def evaluate(tasks: list[str], vlm: str, num_runs: int, run: str, extra: list[str]) -> str:
     import shutil
     import subprocess
@@ -62,10 +69,18 @@ def evaluate(tasks: list[str], vlm: str, num_runs: int, run: str, extra: list[st
     with open(log_path, "w") as log:
         proc = subprocess.Popen(cmd, cwd="/workspace/robolab", stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, bufsize=1)
+        started = False
         for line in proc.stdout:
             log.write(line)
+            started = started or "[RoboLab] Running" in line
             if any(k in line for k in keep) and "[Warning]" not in line:
                 print(line.rstrip()[:400], flush=True)
+            if not started and "[crash] Wrote dump file" in line:
+                proc.kill()
+                proc.wait()
+                log.flush()
+                runs.commit()
+                raise KitStartupCrash(f"{run}: Isaac Sim crashed during startup (GPU/driver); retrying on a new container")
         proc.wait()
     out = Path("/workspace/robolab/output")
     for d in out.glob(f"*{run}*"):
@@ -107,6 +122,47 @@ def collect(run_names: list[str]) -> list[dict]:
     return rows
 
 
+@app.function(volumes={"/runs": runs, "/results": results_vol}, timeout=1800)
+def publish(run_names: list[str], dest: str, config: dict) -> str:
+    """Copy RoboLab episodes into the armlab-runs volume in the results page's layout
+    (<dest>/<task>/seed<k>/result.json + video.mp4, summary.txt, config.json)."""
+    import json
+    import shutil
+    from pathlib import Path
+
+    runs.reload()
+    out = Path("/results") / dest
+    out.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for name in run_names:
+        f = Path("/runs") / name / "episode_results.jsonl"
+        if not f.exists():
+            continue
+        for r in (json.loads(line) for line in f.read_text().splitlines() if line.strip()):
+            rows.append(r)
+            task, k = r.get("task_name") or r.get("env_name"), int(r.get("run", 0))
+            ep = out / task / f"seed{k}"
+            ep.mkdir(parents=True, exist_ok=True)
+            (ep / "result.json").write_text(json.dumps(episode_result(r)))
+            vids = sorted((Path("/runs") / name / task).glob(f"*_{k}_viewport.mp4")) or \
+                sorted((Path("/runs") / name / task).glob(f"*_{k}.mp4"))
+            if vids:
+                shutil.copyfile(vids[0], ep / "video.mp4")
+    tasks = list(dict.fromkeys(r.get("task_name") or r.get("env_name") for r in rows))
+    (out / "summary.txt").write_text(summary_table(rows, tasks) + "\n")
+    (out / "config.json").write_text(json.dumps({**config, "tasks": ",".join(tasks), "sources": run_names}))
+    results_vol.commit()
+    return f"published {len(rows)} episodes to armlab-runs/{dest}"
+
+
+def episode_result(r: dict) -> dict:
+    """One RoboLab episode row -> the results page's per-episode result.json fields."""
+    return {"task": r.get("task_name") or r.get("env_name"), "seed": int(r.get("run", 0)),
+            "success": bool(r.get("success")), "score": 100 * float(r.get("score") or 0),
+            "model_latency_s": (r.get("timing") or {}).get("policy_inference_s"),
+            "error": "" if r.get("success") else str(r.get("reason") or "")}
+
+
 def summary_table(rows: list[dict], task_order: list[str]) -> str:
     names = {v: k for k, v in PAPER_TASKS.items()}
     lines = [f"{'task':<34} {'success':>8} {'mean score':>10} {'policy s/ep':>11}"]
@@ -128,10 +184,17 @@ def summary_table(rows: list[dict], task_order: list[str]) -> str:
 
 @app.local_entrypoint()
 def main(tasks: str = "BananaInBowlTask", vlm: str = "anthropic:claude-opus-5-5:medium", num_runs: int = 5,
-         run: str = "", extra: str = "", parallel: bool = True):
+         run: str = "", extra: str = "", parallel: bool = True, publish_as: str = "", publish_only: str = ""):
     """--tasks paper10 runs the report's 10-task subset. With --parallel (default) each task gets its own L40S
-    container and output folder <run>-<task>; otherwise all tasks run sequentially in one container."""
+    container and output folder <run>-<task>; otherwise all tasks run sequentially in one container.
+    --publish-as NAME also copies the episodes to the armlab-runs volume (results page) as run NAME;
+    --publish-only a,b,c publishes existing robolab-runs folders without running anything."""
     import time
+
+    cfg = {"policy": "armlab-direct", "vlm": vlm, "seeds": f"0-{num_runs - 1}", "benchmark": "RoboLab (Isaac Lab)"}
+    if publish_only:
+        print(publish.remote(publish_only.split(","), publish_as or run, cfg))
+        return
 
     run = run or time.strftime("%Y%m%d-%H%M%S-armlab")
     task_list = list(PAPER_TASKS.values()) if tasks == "paper10" else tasks.split(",")
@@ -145,4 +208,6 @@ def main(tasks: str = "BananaInBowlTask", vlm: str = "anthropic:claude-opus-5-5:
         names = [run]
         print(evaluate.remote(task_list, vlm, num_runs, run, xs))
     print("\n" + summary_table(collect.remote(names), task_list))
+    if publish_as:
+        print(publish.remote(names, publish_as, cfg))
     print(f"\nDownload: modal volume get robolab-runs <name> runs/robolab/   (names: {', '.join(names)})")
