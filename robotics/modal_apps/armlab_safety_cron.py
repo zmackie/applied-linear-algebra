@@ -10,8 +10,8 @@ clips to `_safety/clips/processed/<date>/`. An empty inbox still produces a (sho
   modal run modal_apps/armlab_safety_cron.py          # run once now instead of waiting for the schedule
 
 Config at deploy time: ARMLAB_SAFETY_VLM (default `cosmos`), ARMLAB_SAFETY_SITE, ARMLAB_SAFETY_CRON
-(default "0 7 * * *" America/New_York). Keys: only from Modal secrets (`armlab-llm`; ARMLAB_VLLM_KEY if the
-Cosmos endpoint has a password).
+(default "0 7 * * *" America/New_York). Keys: only from Modal secrets (`armlab-llm`, and
+`armlab-vllm` for the Cosmos endpoint's bearer key).
 """
 import os
 
@@ -33,9 +33,7 @@ image = (
 )
 app = modal.App("armlab-safety-cron", image=image)
 runs = modal.Volume.from_name("armlab-runs", create_if_missing=True)
-secrets = [modal.Secret.from_name("armlab-llm")]
-if os.environ.get("ARMLAB_VLLM_KEY"):
-    secrets.append(modal.Secret.from_dict({"ARMLAB_VLLM_KEY": os.environ["ARMLAB_VLLM_KEY"]}))
+secrets = [modal.Secret.from_name("armlab-llm"), modal.Secret.from_name("armlab-vllm")]  # model keys + Cosmos key
 
 
 @app.function(volumes={"/runs": runs}, secrets=secrets, timeout=2 * 3600,

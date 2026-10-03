@@ -36,13 +36,17 @@ def test_doctor_never_prints_secret_values(tmp_path, monkeypatch, capsys):
     rows = {"secret": [{"Name": "armlab-llm"}], "volume": [{"Name": "armlab-runs"}],
             "app": [{"Description": "armlab-results", "State": "deployed"}]}
     ok = lambda n, u: doctor.Check(f"reach {n}", doctor.OK, "HTTPS ok")
-    checks = doctor.run_checks(env=env, modal_cli=lambda kind, _: rows[kind], host_check=ok)
+    checks = doctor.run_checks(env=env, modal_cli=lambda kind, _: rows[kind], host_check=ok, cosmos_auth=lambda: False)
     out = doctor.format_report(checks) + json.dumps([c.__dict__ for c in checks])
     assert secret not in out and "TOKENIDVALUE" not in out and "XYZSECRET" not in out
     by = {c.name: c for c in checks}
     assert by["modal token"].status == doctor.OK and "env" in by["modal token"].detail
     assert by["modal secret armlab-llm"].status == doctor.OK
     assert by["modal secret huggingface"].status == doctor.FAIL
+    assert by["modal secret armlab-vllm"].status == doctor.FAIL
+    assert by["cosmos endpoint auth"].status == doctor.WARN and "unauthenticated" in by["cosmos endpoint auth"].detail
+    checks = doctor.run_checks(env=env, modal_cli=lambda kind, _: rows[kind], host_check=ok, cosmos_auth=lambda: True)
+    assert {c.name: c for c in checks}["cosmos endpoint auth"].status == doctor.OK
     assert by["modal app armlab-safety-cron"].status == doctor.WARN and not by["modal app armlab-safety-cron"].required
     assert by["model keys in this shell"].status == doctor.WARN and "ANTHROPIC_API_KEY" in by["model keys in this shell"].detail
 
@@ -160,6 +164,7 @@ def test_safety_empty_inbox_never_builds_reasoner(tmp_path):
 
 def test_cosmos_spec_is_self_hosted(monkeypatch):
     monkeypatch.setenv("ARMLAB_COSMOS_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("ARMLAB_VLLM_KEY", "test-key")
     monkeypatch.delenv("ARMLAB_COSMOS_MODEL", raising=False)
     v = make_vlm("cosmos")
     assert v.model == "nvidia/Cosmos3-Nano" and str(v.client.base_url).startswith("https://example.invalid/v1")
@@ -168,3 +173,41 @@ def test_cosmos_spec_is_self_hosted(monkeypatch):
     assert make_vlm("cosmos:other/model@https://x.invalid/v1").model == "other/model"
     with pytest.raises(ValueError, match="gone"):
         make_vlm("nvidia:nvidia/cosmos-reason2-8b")
+
+
+def test_cosmos_key_from_env_or_modal_lookup(monkeypatch):
+    import sys
+    import types
+
+    from armlab.policy import vlm
+
+    monkeypatch.setenv("ARMLAB_COSMOS_URL", "https://example.invalid/v1")
+    monkeypatch.setenv("ARMLAB_VLLM_KEY", "from-env")
+    assert make_vlm("cosmos").client.api_key == "from-env"
+
+    # No env key: fetched once from the deployed app's api_key function (here a fake modal module), then cached.
+    monkeypatch.delenv("ARMLAB_VLLM_KEY")
+    monkeypatch.setattr(vlm, "_COSMOS_KEYS", {})
+    calls = []
+
+    class Fn:
+        @staticmethod
+        def from_name(app, name):
+            calls.append((app, name))
+            return types.SimpleNamespace(remote=lambda: "from-modal")
+
+    monkeypatch.setitem(sys.modules, "modal", types.SimpleNamespace(Function=Fn))
+    assert make_vlm("cosmos").client.api_key == "from-modal"
+    assert make_vlm("cosmos").client.api_key == "from-modal"
+    assert calls == [("cosmos-reason", "api_key")]
+
+    # Lookup failure degrades to no key (the server answers 401) instead of crashing.
+    monkeypatch.setattr(vlm, "_COSMOS_KEYS", {})
+
+    class Broken:
+        @staticmethod
+        def from_name(app, name):
+            raise RuntimeError("no token")
+
+    monkeypatch.setitem(sys.modules, "modal", types.SimpleNamespace(Function=Broken))
+    assert vlm.cosmos_api_key() is None

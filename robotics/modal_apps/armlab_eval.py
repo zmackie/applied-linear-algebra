@@ -45,6 +45,7 @@ image = (
 app = modal.App("armlab-eval", image=image)
 runs = modal.Volume.from_name("armlab-runs", create_if_missing=True)
 llm = modal.Secret.from_name("armlab-llm")
+vllm_key = modal.Secret.from_name("armlab-vllm")  # Cosmos endpoint bearer key, for --vlm cosmos
 
 
 def _run_one(task, seed, policy, vlm, clock, obs_mode, video, run) -> dict:
@@ -63,7 +64,7 @@ def _run_one(task, seed, policy, vlm, clock, obs_mode, video, run) -> dict:
     return asdict(res) | {"correction_fraction": res.correction_fraction}
 
 
-@app.function(secrets=[llm], volumes={"/runs": runs}, timeout=3 * 3600, cpu=2.0, memory=4096, retries=0)
+@app.function(secrets=[llm, vllm_key], volumes={"/runs": runs}, timeout=3 * 3600, cpu=2.0, memory=4096, retries=0)
 def episode(task: str, seed: int, policy: str, vlm: str, clock: str, obs_mode: str, video: bool, run: str) -> dict:
     return _run_one(task, seed, policy, vlm, clock, obs_mode, video, run)
 

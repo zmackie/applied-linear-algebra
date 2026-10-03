@@ -11,6 +11,7 @@ import base64
 import io
 import json
 import os
+import sys
 import time
 from dataclasses import dataclass
 from typing import Callable, Union
@@ -143,10 +144,10 @@ class OpenAICompatVLM(VLM):
 
     def __init__(self, model: str, base_url: str | None = None, api_key_env: str = "OPENAI_API_KEY",
                  json_mode: bool = True, reasoning_effort: str | None = None, extra_body: dict | None = None,
-                 timeout_s: float = 600.0):
+                 timeout_s: float = 600.0, api_key: str | None = None):
         from openai import OpenAI
 
-        key = os.environ.get(api_key_env) or ("EMPTY" if api_key_env == "ARMLAB_VLLM_KEY" else None)
+        key = api_key or os.environ.get(api_key_env) or ("EMPTY" if api_key_env == "ARMLAB_VLLM_KEY" else None)
         if not key:
             raise MissingCredentials(f"Set {api_key_env} to use {model}")
         self.client = OpenAI(api_key=key, base_url=base_url, timeout=timeout_s, max_retries=3)
@@ -244,6 +245,30 @@ def cosmos_base_url() -> str:
     return url.rstrip("/") + "/v1"
 
 
+_COSMOS_KEYS: dict[str, str | None] = {}
+
+
+def cosmos_api_key() -> str | None:
+    """Bearer key for the self-hosted Cosmos endpoint, which always requires one.
+
+    $ARMLAB_VLLM_KEY if set (Modal apps get it by mounting the `armlab-vllm` secret); otherwise fetched once per
+    process from the deployed `cosmos-reason` app's `api_key` function using the caller's Modal token. The value is
+    only held in memory. Returns None if neither works (requests will then get 401)."""
+    if os.environ.get("ARMLAB_VLLM_KEY"):
+        return os.environ["ARMLAB_VLLM_KEY"]
+    app = os.environ.get("ARMLAB_COSMOS_APP", COSMOS_APP)
+    if app not in _COSMOS_KEYS:
+        try:
+            import modal
+
+            _COSMOS_KEYS[app] = modal.Function.from_name(app, "api_key").remote()
+        except Exception as e:  # no token, app not deployed, older deployment without api_key()
+            print(f"[armlab] could not fetch the Cosmos endpoint key from Modal app {app!r} ({type(e).__name__}); "
+                  "set ARMLAB_VLLM_KEY or mount the armlab-vllm secret", file=sys.stderr)
+            _COSMOS_KEYS[app] = None
+    return _COSMOS_KEYS[app]
+
+
 def make_vlm(spec: str, **kw) -> VLM:
     """Build a client from a short spec string.
 
@@ -251,7 +276,7 @@ def make_vlm(spec: str, **kw) -> VLM:
     openai:<model>                   uses OPENAI_API_KEY (and OPENAI_BASE_URL if set)
     cosmos[:<model>][@<base_url>]    self-hosted Cosmos Reason on Modal; model defaults to $ARMLAB_COSMOS_MODEL or
                                      nvidia/Cosmos3-Nano, URL to $ARMLAB_COSMOS_URL or the deployed Modal app.
-                                     Optional endpoint password: ARMLAB_VLLM_KEY
+                                     Endpoint key: ARMLAB_VLLM_KEY, else fetched via Modal (cosmos_api_key)
     vllm:<model>@<base_url>          any other OpenAI-compatible server, ARMLAB_VLLM_KEY
     """
     kind, _, rest = spec.partition(":")
@@ -263,7 +288,7 @@ def make_vlm(spec: str, **kw) -> VLM:
     if kind == "cosmos":
         model, _, base = rest.partition("@")
         return OpenAICompatVLM(model=model or cosmos_model(), base_url=base or cosmos_base_url(),
-                               api_key_env="ARMLAB_VLLM_KEY", **kw)
+                               api_key_env="ARMLAB_VLLM_KEY", api_key=cosmos_api_key(), **kw)
     if kind == "vllm":
         model, _, base = rest.partition("@")
         return OpenAICompatVLM(model=model, base_url=base, api_key_env="ARMLAB_VLLM_KEY", **kw)

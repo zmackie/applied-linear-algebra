@@ -150,13 +150,16 @@ Model keys live **only** in Modal secrets. Anything you drive runs from (GitHub 
 |---|---|---|
 | Modal secret `armlab-llm` | `ANTHROPIC_API_KEY` (required), `OPENAI_API_KEY` (optional, GPT-6 Astra comparison) | `armlab_eval.py` direct/hybrid episodes, `armlab_safety_cron.py`, `robolab_eval.py` |
 | Modal secret `huggingface` | `HF_TOKEN` (required for all Cosmos work) | `cosmos_reason_vllm.py` (Cosmos 3), `cosmos_transfer.py` |
-| your shell at deploy time (optional) | `ARMLAB_VLLM_KEY`: password for the Cosmos endpoint; `ARMLAB_RESULTS_KEY`: key for the results page | stored as Modal secrets by `modal deploy` |
+| Modal secret `armlab-vllm` | `ARMLAB_VLLM_KEY` (required): bearer key the Cosmos endpoint always demands (vLLM `--api-key`) | `cosmos_reason_vllm.py` (server); `armlab_safety_cron.py`, `armlab_physics.py`, `armlab_eval.py` mount it; local `--vlm cosmos` clients fetch it in memory from the app's `api_key` function with your Modal token |
+| your shell at deploy time (optional) | `ARMLAB_RESULTS_KEY`: key for the results page | stored as a Modal secret by `modal deploy` |
 | GitHub repo secrets | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | the `run-eval` workflow |
 | laptop / agent box | a Modal token (`modal token new`, or the two env vars) | `modal run` / `modal deploy` |
 
 ```sh
 modal secret create armlab-llm ANTHROPIC_API_KEY=... OPENAI_API_KEY=...
 modal secret create huggingface HF_TOKEN=...
+# Cosmos endpoint key, generated and stored without ever being printed:
+python -c "import secrets, modal; modal.Secret.objects.create('armlab-vllm', {'ARMLAB_VLLM_KEY': secrets.token_hex(32)})"
 ```
 
 **Check a machine:** `make doctor` (or `armlab-doctor`, `armlab-doctor --json`) reports whether a Modal token is configured, whether api.modal.com and GitHub are reachable, whether the Modal secrets, the `armlab-runs` volume and the deployed apps exist, and whether model keys are sitting in the local shell. It never prints a secret value, and it still runs (and says what is missing) with no token at all. `modal run modal_apps/armlab_eval.py --check-keys` asks Modal which keys `armlab-llm` holds (names only).

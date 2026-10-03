@@ -6,6 +6,8 @@ Modal token. This checks, without ever printing a secret value:
   - is a Modal token configured (MODAL_TOKEN_ID/MODAL_TOKEN_SECRET env vars or ~/.modal.toml)?
   - are api.modal.com and GitHub reachable over HTTPS?
   - with a token: do the Modal secrets, the `armlab-runs` volume and the deployed armlab apps exist?
+  - is the deployed Cosmos endpoint the key-protected version (it has the `api_key` function)? Checked by a
+    metadata lookup only, so it never wakes the GPU.
   - are model keys sitting in this shell's environment (fine for local runs, not needed for Modal runs)?
 
   armlab-doctor            # human-readable; exits 0 unless --strict and something required is missing
@@ -22,7 +24,7 @@ import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-REQUIRED_SECRETS = ("armlab-llm", "huggingface")
+REQUIRED_SECRETS = ("armlab-llm", "huggingface", "armlab-vllm")  # armlab-vllm: Cosmos endpoint bearer key
 REQUIRED_VOLUMES = ("armlab-runs",)
 EXPECTED_APPS = ("armlab-results", "armlab-safety-cron", "cosmos-reason")
 HOSTS = {"api.modal.com": "https://api.modal.com", "github.com": "https://github.com"}
@@ -110,7 +112,24 @@ def _names(rows: list[dict], *keys: str) -> set[str]:
     return out
 
 
-def run_checks(env: dict | None = None, network: bool = True, modal_cli=_modal_cli, host_check=check_host) -> list[Check]:
+def cosmos_auth_deployed(app: str = "cosmos-reason") -> bool | None:
+    """True if the deployed Cosmos app is the key-protected version (exposes `api_key`), False if it is an older
+    deployment (possibly unauthenticated), None if the app is not deployed. Metadata lookup only: no GPU, no key."""
+    import modal
+
+    try:
+        modal.Function.from_name(app, "serve").hydrate()
+    except Exception:
+        return None
+    try:
+        modal.Function.from_name(app, "api_key").hydrate()
+        return True
+    except Exception:
+        return False
+
+
+def run_checks(env: dict | None = None, network: bool = True, modal_cli=_modal_cli, host_check=check_host,
+               cosmos_auth=cosmos_auth_deployed) -> list[Check]:
     env = os.environ if env is None else env
     checks: list[Check] = []
 
@@ -163,6 +182,15 @@ def run_checks(env: dict | None = None, network: bool = True, modal_cli=_modal_c
                 else:
                     checks.append(Check(f"modal {kind} {n}", FAIL if required else WARN, "missing: " + hint.format(n=n),
                                         required))
+
+        state = cosmos_auth()
+        if state is True:
+            checks.append(Check("cosmos endpoint auth", OK, "requires the armlab-vllm bearer key", required=False))
+        elif state is False:
+            checks.append(Check("cosmos endpoint auth", WARN, "older deployment that may accept unauthenticated "
+                                "requests: `modal deploy modal_apps/cosmos_reason_vllm.py`", required=False))
+        else:
+            checks.append(Check("cosmos endpoint auth", SKIP, "cosmos-reason not deployed", required=False))
 
     local = [k for k in MODEL_KEYS if env.get(k)]
     checks.append(Check("model keys in this shell", OK if not local else WARN,
