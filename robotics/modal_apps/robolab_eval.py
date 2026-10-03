@@ -49,14 +49,39 @@ class KitStartupCrash(RuntimeError):
     pass
 
 
-# Some L40S hosts crash Kit while it initialises the GPU (breakpad dump before the first episode, then the process
-# hangs instead of exiting). Treat that as an infrastructure failure: kill it and let Modal retry on another host.
+# Isaac Sim 5.0 (isaac-lab 2.2.0) crashes during GPU init on Modal L40S hosts running the R610 driver (610.57.04,
+# rolled out 2026-10-03): Warp "CUDA error 36: API call is not supported in the installed CUDA driver", then a
+# breakpad dump and a hang. R580 hosts (580.95.05) work. Check the driver before starting Kit, and on a bad host (or a
+# startup crash anyway) stop this container taking inputs and fail, so Modal retries the call on a different container.
+SUPPORTED_DRIVER_MAJORS = (535, 550, 570, 575, 580)
+
+
+def driver_supported(version: str) -> bool:
+    try:
+        return int(version.strip().split(".")[0]) in SUPPORTED_DRIVER_MAJORS
+    except ValueError:
+        return True  # unknown: try it, the startup-crash check still applies
+
+
+def _abandon_container(msg: str):
+    import modal.experimental
+
+    modal.experimental.stop_fetching_inputs()
+    raise KitStartupCrash(msg)
+
+
 @app.function(gpu="L40S", secrets=[modal.Secret.from_name("armlab-llm")], volumes={"/runs": runs},
-              timeout=6 * 3600, memory=32768, retries=modal.Retries(max_retries=2, initial_delay=5.0))
+              timeout=6 * 3600, memory=32768, retries=modal.Retries(max_retries=8, initial_delay=1.0))
 def evaluate(tasks: list[str], vlm: str, num_runs: int, run: str, extra: list[str]) -> str:
     import shutil
     import subprocess
     from pathlib import Path
+
+    drv = subprocess.run(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"], capture_output=True,
+                         text=True).stdout.strip()
+    print(f"[armlab] {run}: NVIDIA driver {drv or '?'}", flush=True)
+    if drv and not driver_supported(drv):
+        _abandon_container(f"{run}: driver {drv} is not supported by Isaac Sim 5.0; retrying on another host")
 
     cmd = [ISAAC_PY, "-m", "armlab.robolab.run_llm_eval", "--headless", "--enable-gt-state", "--vlm", vlm,
            "--num-runs", str(num_runs), "--output-folder-name", run, "--log-file", f"/runs/{run}_decisions.jsonl",
@@ -80,7 +105,7 @@ def evaluate(tasks: list[str], vlm: str, num_runs: int, run: str, extra: list[st
                 proc.wait()
                 log.flush()
                 runs.commit()
-                raise KitStartupCrash(f"{run}: Isaac Sim crashed during startup (GPU/driver); retrying on a new container")
+                _abandon_container(f"{run}: Isaac Sim crashed during startup (driver {drv}); retrying on a new container")
         proc.wait()
     out = Path("/workspace/robolab/output")
     for d in out.glob(f"*{run}*"):

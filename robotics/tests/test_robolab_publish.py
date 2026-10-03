@@ -42,3 +42,10 @@ def test_episode_result_and_results_page_roundtrip(tmp_path):
     assert loaded.episodes[0].score == 100 and loaded.episodes[0].error == ""
     assert "object_grabbed" in loaded.episodes[1].error
     assert "OVERALL" in loaded.summary and "1/2" in loaded.summary
+
+
+def test_driver_supported():
+    m = _load()
+    assert m.driver_supported("580.95.05")
+    assert not m.driver_supported("610.57.04")
+    assert m.driver_supported("garbage")
