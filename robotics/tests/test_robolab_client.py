@@ -137,3 +137,53 @@ def test_yaw_zero_closes_along_x_at_robolab_reset_pose():
         R = quat_to_mat(c._chunks[0][-1][3:7])
         assert np.allclose(np.abs(R @ CLOSE_AXIS_LOCAL), np.abs(expect), atol=1e-6)
         assert np.allclose(R[:, 0], [0, 0, -1], atol=1e-6)  # still pointing straight down
+
+
+def _box_corners(center, size, yaw_deg):
+    cx, cy, cz = center
+    L, W, H = size
+    c, s = math.cos(math.radians(yaw_deg)), math.sin(math.radians(yaw_deg))
+    out = []
+    for dx in (-L / 2, L / 2):
+        for dy in (-W / 2, W / 2):
+            for dz in (-H / 2, H / 2):
+                out.append([cx + c * dx - s * dy, cy + s * dx + c * dy, cz + dz])
+    return np.array(out)
+
+
+def test_footprint_gives_short_side_grasp_yaw():
+    _stub_robolab()
+    from armlab.robolab.client import footprint
+
+    f = footprint(_box_corners([0.4, 0.25, 0.02], [0.12, 0.06, 0.04], 30.0))
+    assert f["footprint_m"] == [0.12, 0.06]
+    assert math.isclose(f["grasp_yaw_deg"], -60.0, abs_tol=0.2)  # short side is perpendicular to the 30 deg long axis
+    assert f["center"] == [0.4, 0.25, 0.02] and f["top_z"] == 0.04 and f["bottom_z"] == 0.0
+
+
+def test_client_reports_bbox_footprint_in_root_frame_and_sets_robolab_prompt():
+    _stub_robolab()
+    from armlab.policy.llm import SYSTEM_BASE, DirectVLMPolicy
+    from armlab.policy.types import Decision
+    from armlab.robolab.client import ROBOLAB_SYSTEM_NOTES, VLMRoboLabClient
+
+    off = np.array([1.0, 2.0, 0.0])
+    corners_env = _box_corners([0.5, -0.1, 0.03], [0.10, 0.05, 0.06], 0.0) + off
+    seen = {}
+
+    class P(DirectVLMPolicy):
+        def act(self, obs):
+            seen["obs"] = obs
+            return Decision([], "llm", "wait")
+
+    pol = P(vlm=None)
+    c = VLMRoboLabClient(pol, bbox_fn=lambda name, env_id: corners_env)
+    assert pol.system_prompt == SYSTEM_BASE + ROBOLAB_SYSTEM_NOTES
+    q_down = [0.0, 1.0, 0.0, 0.0]
+    c.infer(_raw_obs([0.4, 0.0, 0.4], q_down, [0.4, 0.0, 0.4], objects={"box": [0.5, -0.1, 0.0]}), "x")
+    o = seen["obs"].objects["box"]
+    assert o["center"] == [0.5, -0.1, 0.03] and o["footprint_m"] == [0.1, 0.05]
+    assert math.isclose(abs(o["grasp_yaw_deg"]), 90.0, abs_tol=0.2)
+    # An empty decision holds the current pose for idle_steps instead of re-querying every control step.
+    chunk = c._chunks[0]
+    assert len(chunk) == c.idle_steps > 1 and np.allclose(chunk, chunk[0])

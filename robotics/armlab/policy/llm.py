@@ -164,6 +164,7 @@ class VLMPolicyBase(Policy):
     notes: str = ""
     instruction: str = ""
     parse_failures: int = 0
+    system_prompt: str = ""  # overrides SYSTEM_BASE (e.g. RoboLab's different workspace)
 
     def reset(self, instruction: str) -> None:
         self.instruction = instruction
@@ -230,7 +231,7 @@ class VLMPolicyBase(Policy):
                 parts.append("CANDIDATE (System 1): " + json.dumps([w.to_dict() for w in candidate]))
             parts += extra
             parts.append(task_text)
-            text, u = self.vlm.complete(SYSTEM_BASE, parts, decision_schema(hybrid))
+            text, u = self.vlm.complete(self.system_prompt or SYSTEM_BASE, parts, decision_schema(hybrid))
             usage.add(u)
             try:
                 d = extract_json(text)
