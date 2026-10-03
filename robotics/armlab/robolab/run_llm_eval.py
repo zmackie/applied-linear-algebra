@@ -8,6 +8,7 @@ space so the model can command end-effector targets (the report's "direct" inter
 """
 import argparse
 import json
+import os
 import sys
 import traceback
 
@@ -41,7 +42,19 @@ from armlab.robolab.client import VLMRoboLabClient  # noqa: E402
 robolab.constants.ENABLE_SUBTASK_PROGRESS_CHECKING = args_cli.enable_subtask
 auto_register_droid_abs_ik_envs(task_dirs=args_cli.task_dirs, task=args_cli.task)
 
-LOG: list = []
+class StreamingLog(list):
+    """Decision log that is also appended to --log-file as it grows, so a long or crashed run can be inspected."""
+
+    def append(self, row):
+        super().append(row)
+        with open(args_cli.log_file, "a") as f:
+            f.write(json.dumps(row) + "\n")
+        print(f"[armlab] decision {len(self)}: {row.get('think_s', 0):.1f}s {str(row.get('rationale', ''))[:160]}",
+              flush=True)
+
+
+open(args_cli.log_file, "w").close()
+LOG: list = StreamingLog()
 
 
 def make_client(args):
@@ -56,20 +69,25 @@ def make_client(args):
     return client
 
 
-def main():
+def main() -> int:
+    # SimulationApp.close() hard-exits the process (exit code 0), so anything raised inside run_evaluation must be
+    # printed and turned into an exit code *before* closing, or the run silently "succeeds" with no episodes.
+    rc = 0
     try:
         run_evaluation(args_cli, policy=f"armlab-{args_cli.policy}", client_factory=make_client)
+    except BaseException as e:  # noqa: BLE001
+        print(f"[armlab] terminated with error: {type(e).__name__}: {e}", flush=True)
+        traceback.print_exc()
+        sys.stderr.flush()
+        rc = 1
     finally:
-        with open(args_cli.log_file, "w") as f:
-            for row in LOG:
-                f.write(json.dumps(row) + "\n")
-        simulation_app.close()
+        print(f"[armlab] {len(LOG)} decisions logged to {args_cli.log_file}; exit code {rc}", flush=True)
+    return rc
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        print(f"[armlab] terminated with error: {e}")
-        traceback.print_exc()
-        sys.exit(1)
+    code = main()
+    sys.stdout.flush()
+    if code:
+        os._exit(code)  # skip simulation_app.close(), which would exit 0
+    simulation_app.close()

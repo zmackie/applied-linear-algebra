@@ -28,12 +28,51 @@ def quat_to_mat(q) -> np.ndarray:
     ])
 
 
+# RoboLab's DroidIKActionCfg tracks the Robotiq 2F-85 base flange ("base_link"). Its `eef_frame` / `eef_pos` is
+# the same point (EEF_OFFSET_POS = 0, rotation only), so it cannot be used as the fingertip. Robotiq's spec puts the
+# fingertips 162.8 mm from the flange; aim a little short of that so "tip at z" means the pads straddle z.
+TIP_OFFSET_M = 0.155
+# Robotiq 2F-85 base_link: the fingers close along its local y axis (the knuckles sit at +-y, as in the ROS
+# robotiq_arg2f_85 description). Verified on the first Modal run: at RoboLab's reset pose local y is root +y.
+CLOSE_AXIS_LOCAL = np.array([0.0, 1.0, 0.0])
+
+
+def closing_yaw(R0: np.ndarray) -> float:
+    """Yaw (rad, about root z) of the finger-closing line at the reset pose, wrapped to (-90, 90] deg.
+    The policy's convention (shared with the MuJoCo sim) is "yaw 0 = fingers close along x, yaw 90 = along y"."""
+    c = R0 @ CLOSE_AXIS_LOCAL
+    phi = math.atan2(c[1], c[0])
+    if phi <= -math.pi / 2:
+        phi += math.pi
+    elif phi > math.pi / 2:
+        phi -= math.pi
+    return phi
+
+
+def fingertip_offset_local(R0: np.ndarray, length: float = TIP_OFFSET_M) -> np.ndarray:
+    """Flange->fingertip vector in the flange frame. The fingers point along whichever flange axis points most
+    nearly straight down at the episode's start (RoboLab resets with the gripper pointing at the table), which
+    avoids hard-coding the USD's axis convention."""
+    world_down = np.array([0.0, 0.0, -1.0])
+    axes_world = R0.T  # rows = flange x/y/z axes in the root frame
+    scores = np.concatenate([axes_world @ world_down, -(axes_world @ world_down)])
+    k = int(np.argmax(scores))
+    local = np.zeros(3)
+    local[k % 3] = length if k < 3 else -length
+    return local
+
+
 class VLMRoboLabClient(InferenceClient):
     open_loop_horizon = 1  # chunks have variable length; see _needs_refresh
 
     def __init__(self, policy, control_hz: float = 15.0, max_speed: float = 0.2, grip_hold_s: float = 0.7,
-                 use_gt_state: bool = True, log: list | None = None):
+                 use_gt_state: bool = True, log: list | None = None, tip_offset_m: float = TIP_OFFSET_M,
+                 settle_s: float = 0.6):
         super().__init__()
+        self.tip_offset_m = tip_offset_m
+        # Differential IK lags the interpolated target by 1-2 cm; hold the goal this long before the gripper
+        # opens/closes so it acts where the model asked (the first run closed ~2 cm high and the banana slipped).
+        self.settle_steps = max(0, round(settle_s * control_hz))
         self.policy = policy
         self.dt = 1.0 / control_hz
         self.max_speed = max_speed
@@ -83,12 +122,13 @@ class VLMRoboLabClient(InferenceClient):
         env_id = ex["env_id"]
         if env_id not in self._state:
             R0 = quat_to_mat(ex["ee_quat"])
-            tip = ex["eef_pos"] if ex["eef_pos"] is not None else ex["ee_pos"] + R0 @ np.array([0, 0, 0.16])
+            off = fingertip_offset_local(R0, self.tip_offset_m)  # flange -> fingertip, flange frame
             self._state[env_id] = {
                 "R0": R0,
-                "tip_offset_local": R0.T @ (tip - ex["ee_pos"]),  # flange -> fingertip, in flange frame
-                "cmd_tip": tip.copy(),
-                "cmd_yaw": 0.0,
+                "tip_offset_local": off,
+                "cmd_tip": ex["ee_pos"] + R0 @ off,
+                "yaw0": closing_yaw(R0),
+                "cmd_yaw": closing_yaw(R0),
                 "cmd_grip": 0.0,
                 "decisions": 0,
             }
@@ -111,6 +151,9 @@ class VLMRoboLabClient(InferenceClient):
         for name, o in gt["objects"].items():
             p_root = R_env_root.T @ (np.asarray(o["pos"], float) - t)
             out[name] = {"xyz": [round(float(v), 3) for v in p_root]}
+            if o.get("quat") is not None:  # yaw of the object's own frame about root z (mesh axes, not semantics)
+                Ro = R_env_root.T @ quat_to_mat(o["quat"])
+                out[name]["yaw_deg"] = round(math.degrees(math.atan2(Ro[1, 0], Ro[0, 0])), 1)
         return out
 
     def _pack_request(self, ex: dict, instruction: str) -> dict:
@@ -120,7 +163,7 @@ class VLMRoboLabClient(InferenceClient):
             instruction=instruction,
             images={"head": ex["head"], "wrist": ex["wrist"] if ex["wrist"] is not None else ex["head"]},
             eef_xyz=self._tip(ex, st),
-            eef_yaw_deg=math.degrees(math.atan2(R[1, 0], R[0, 0])),
+            eef_yaw_deg=math.degrees(wrap_angle(math.atan2(R[1, 0], R[0, 0]) + st["yaw0"])),
             gripper_width=0.085 * (1.0 - ex["gripper"]),  # Robotiq 2F-85: 0 = open, 1 = closed
             step=st["decisions"], max_steps=0, sim_time=0.0,
             objects=self._objects_in_root(ex),
@@ -161,12 +204,13 @@ class VLMRoboLabClient(InferenceClient):
                 rows.append(self._action(st, start + a * (goal - start), start_yaw + a * dyaw, st["cmd_grip"]))
             st["cmd_tip"], st["cmd_yaw"] = goal, start_yaw + dyaw
             if wp.gripper is not None:
+                rows += [self._action(st, goal, st["cmd_yaw"], st["cmd_grip"])] * self.settle_steps
                 st["cmd_grip"] = 1.0 if wp.gripper == "close" else 0.0
                 rows += [self._action(st, goal, st["cmd_yaw"], st["cmd_grip"])] * self.grip_hold_steps
         return np.asarray(rows, dtype=np.float32)
 
     def _action(self, st: dict, tip, yaw: float, grip: float) -> np.ndarray:
-        R = rot_z(yaw) @ st["R0"]
+        R = rot_z(yaw - st["yaw0"]) @ st["R0"]
         flange = np.asarray(tip) - R @ st["tip_offset_local"]
         return np.concatenate([flange, mat_to_quat(R), [grip]])
 
